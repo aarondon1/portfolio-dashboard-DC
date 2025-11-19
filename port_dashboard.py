@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from alpaca.trading.client import TradingClient
 from alpaca.trading.models import Position
 from datetime import datetime
@@ -112,6 +113,19 @@ def get_current_prices(tickers):
             prices[ticker] = None
     return prices
 
+@st.cache_data(ttl=300)
+def get_price_history(ticker, period="6mo", interval="1d"):
+    """Fetch historical prices for a ticker"""
+    try:
+        history = yf.Ticker(ticker).history(period=period, interval=interval)
+    except Exception:
+        return pd.DataFrame()
+    
+    if history.empty:
+        return history
+    
+    history = history.reset_index()
+    return history
 def enrich_positions_with_prices(positions_df):
     """Add current prices and calculate P&L"""
     if positions_df.empty:
@@ -462,6 +476,110 @@ def show_combined_portfolio():
         fig_bar = px.bar(aggregated.nlargest(10, 'market_value'), 
                         x='symbol', y='market_value', title="Top 10 Positions")
         st.plotly_chart(fig_bar, width="stretch")  # Changed from use_container_width=True
+
+    st.divider()
+    st.subheader("📈 Holding Price History")
+    
+    if aggregated.empty:
+        st.info("No holdings available for price history.")
+        return
+    
+    selection_col, range_col = st.columns([2, 1])
+    
+    with selection_col:
+        selected_symbol = st.selectbox(
+            "Select a holding",
+            sorted(aggregated['symbol'].unique().tolist())
+        )
+    
+    with range_col:
+        range_label = st.selectbox(
+            "Range",
+            ["1M", "3M", "6M", "YTD", "1Y", "5Y", "Max"],
+            index=2
+        )
+
+    chart_col, option_col = st.columns([1, 1])
+    
+    with chart_col:
+        chart_type = st.selectbox(
+            "Chart type",
+            ["Line", "Candlestick"],
+            index=1
+        )
+    
+    with option_col:
+        show_ma = st.checkbox("Show 20 & 50-day MA", value=True)
+    
+    period_map = {
+        "1M": "1mo",
+        "3M": "3mo",
+        "6M": "6mo",
+        "YTD": "ytd",
+        "1Y": "1y",
+        "5Y": "5y",
+        "Max": "max"
+    }
+    
+    history = get_price_history(selected_symbol, period=period_map[range_label])
+    
+    if history.empty:
+        st.warning("No historical price data available for this symbol.")
+        return
+    
+    history = history.copy()
+    
+    if show_ma and not history.empty:
+        history["MA20"] = history["Close"].rolling(window=20).mean()
+        history["MA50"] = history["Close"].rolling(window=50).mean()
+    else:
+        history["MA20"] = None
+        history["MA50"] = None
+    
+    if chart_type == "Candlestick":
+        fig_history = go.Figure(
+            data=[
+                go.Candlestick(
+                    x=history["Date"],
+                    open=history["Open"],
+                    high=history["High"],
+                    low=history["Low"],
+                    close=history["Close"],
+                    name="Price"
+                )
+            ]
+        )
+        fig_history.update_layout(
+            title=f"{selected_symbol} candlestick ({range_label})",
+            yaxis_title="Price ($)",
+            xaxis_rangeslider_visible=False
+        )
+    else:
+        fig_history = px.line(
+            history,
+            x="Date",
+            y="Close",
+            title=f"{selected_symbol} price history ({range_label})"
+        )
+        fig_history.update_yaxes(title="Price ($)")
+    
+    if show_ma:
+        for ma_col, label, color in [
+            ("MA20", "20-day MA", "#FFB347"),
+            ("MA50", "50-day MA", "#2E86C1")
+        ]:
+            if history[ma_col].notna().any():
+                fig_history.add_trace(
+                    go.Scatter(
+                        x=history["Date"],
+                        y=history[ma_col],
+                        mode="lines",
+                        name=label,
+                        line=dict(width=1.5, color=color)
+                    )
+                )
+    
+    st.plotly_chart(fig_history, width="stretch")
 
 def main():
     """Main application"""
